@@ -1,0 +1,21 @@
+defaults:
+  - datasets: conll04
+  - _self_
+
+# Overridable via CLI: repo=, commit=, output_json=, solution_overrides=
+repo: null
+commit: null
+output_json: null
+solution_overrides: ""
+
+# Working directory for validation runs (clones, dataset JSONLs, outputs live here).
+workdir: /tmp/entity_processing_validation
+
+# Shared raw dataset cache (downloads reused across runs).
+datasets_cache_dir: ~/.cache/entity_processing_validation/datasets
+
+# Python interpreter used by the validation service itself (linters, VM8 config resolution).
+validator_python: /home/tony/venvs/entity_processing_validation/bin/python
+
+# Timeout (seconds) for a single solution run; hard upper bound above the NFR1 threshold.
+run_timeout_s: 3600

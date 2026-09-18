@@ -20,7 +20,7 @@
 
 **VM4. Sentiment recall.** Over all gold entities carrying a gold sentiment label, the fraction whose gold sentiment equals the sentiment of a matching produced entity. Returns a value from 0 to 1.
 
-**VM5. Relation precision.** Over all relations produced by the solution, the fraction whose (relation_type, head mention, tail mention) matches a gold relation by exact string match of both mentions and equality of the relation type. Returns a value from 0 to 1.
+**VM5. Relation precision.** Over all relations produced by the solution, the fraction whose (relation_type, head mention, tail mention) matches a gold relation by exact string match of both mentions and equality of the relation type. Relation head/tail in the solution output are entity ids (constitution spec §3); the validation service resolves each id through the solution's own `entities` list of the same document to the mention string(s) before matching. Relations with unresolvable endpoint ids count as false positives (against precision only). Returns a value from 0 to 1.
 
 **VM6. Relation recall.** Over all gold relations of the evaluated dataset, the fraction matched by a produced relation with the same (relation_type, head mention, tail mention). Returns a value from 0 to 1.
 
@@ -78,6 +78,8 @@ Results are inspected for:
 Gold entity mentions are taken from the dataset's own entity list; mentions that are common nouns rather than named entities are filtered out from the gold set before metric computation.
 
 **Note:** this is a dataset with Russian news. Strictly speaking, many entities there are just nouns rather than named entities but it is feasible to filter them out.
+
+**Note (known limitation, accepted by design):** the output contract (constitution spec §3) defines entities by mention strings without character offsets, so all entity- and sentiment-based matching is exact mention-string matching. A degenerate solution that flags every gold mention string appearing verbatim in the document text can score substantial recall without genuine extraction. This is accepted as a property of the contract; if gaming resistance becomes necessary, the contract must be amended to require character offsets (a constitution spec revision, not a validation-side change).
 
 ### 4. Overall validation service design
 
@@ -159,7 +161,7 @@ Here is an explanation of the acceptance criterion status:
 Behavioral rules:
 
 - **Hydra configuration**: both entrypoints are Hydra apps. All service parameters (port, working directory, dataset configs, fetch behavior, timeouts) are configurable via Hydra YAML configs under `config/`; credentials and endpoints, if needed, go to `config/user_settings/`.
-- **Two runs, one per dataset**: the runner executes `scripts/extract_entities.py` once per dataset against the same clone of the solution repo (per the invocation contract in the constitution spec §3: hydra-style `input=`, `output=` and the three type-list arguments). VM7 is computed from the combined wall-clock time over both runs.
+- **Two runs, one per dataset**: the runner executes `scripts/extract_entities.py` once per dataset against the same clone of the solution repo (per the invocation contract in the constitution spec §3: hydra-style `input=`, `output=` and the three type-list arguments). VM7 is computed as the maximum over per-dataset values: for each dataset run, wall-clock time divided by that dataset's document count divided by 100; the criterion uses the slowest dataset run.
 - **VM8**: the runner resolves the effective Hydra configuration of the solution (static config composed with the invocation arguments, including `solution_overrides`), e.g. via the solution's own config composition (`--cfg job` or equivalent), and reads the model field.
 - **Failure handling**: if the solution script exits with a non-zero code, produces unparseable output, or dataset preparation fails, all affected metrics get computation_status `failed_to_compute` (making the corresponding criteria `invalid`), with the error message propagated to `error_message`.
 - **Run directory**: each validation run works in a self-contained working directory (clone, datasets, solution output, intermediate artifacts) configured via Hydra, so runs are reproducible and parallelizable.

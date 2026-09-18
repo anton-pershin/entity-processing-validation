@@ -1,0 +1,14 @@
+# Dataset configurations for the validation service.
+# Both datasets live under explicit keys so CLI overrides are uniform
+# (e.g. datasets.conll04.max_docs=4).
+# @package datasets
+
+conll04:
+  name: conll04
+  # Maximum documents used from the dataset (null = all).
+  max_docs: null
+
+rusentne:
+  name: rusentne
+  # Maximum documents used from the dataset (null = all).
+  max_docs: null
