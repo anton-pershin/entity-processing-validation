@@ -1,12 +1,14 @@
 defaults:
-  - datasets: conll04
   - _self_
 
-# Overridable via CLI: repo=, commit=, output_json=, solution_overrides=
+# Overridable via CLI: repo=, commit=, output_json=, solution_overrides=, suite=
 repo: null
 commit: null
 output_json: null
 solution_overrides: ""
+
+# Validation suite to run (config/suites/<name>.yaml): full | small.
+suite: full
 
 # Working directory for validation runs (clones, dataset JSONLs, outputs live here).
 workdir: /tmp/entity_processing_validation

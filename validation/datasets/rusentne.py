@@ -12,7 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from validation.base import GoldDataset, GoldEntity, InputDocument
-from validation.datasets.base import DatasetConfig, PreparedDataset
+from validation.datasets.base import DatasetConfig, PreparedDataset, prepare_paths, subset_documents
 from validation.datasets.cache import DEFAULT_CACHE_DIR, cached_fetch
 
 # Entity tags in RuSentNE that denote common-noun (non-named-entity) mentions.
@@ -111,10 +111,12 @@ def parse_rusentne(raw_path: Path, config: DatasetConfig) -> GoldDataset:
     for text, doc_id in doc_id_by_text.items():
         input_docs.append(InputDocument(doc_id=doc_id, text=text))
 
-    if config.max_docs is not None:
-        keep = {d.doc_id for d in input_docs[: config.max_docs]}
-        entities = [e for e in entities if e.doc_id in keep]
-        input_docs = input_docs[: config.max_docs]
+    # The shuffled universe is the unique-sentence sequence, not the raw row
+    # stream, so a subset is whole sentences rather than a truncated copy of a
+    # document's rows (FR4).
+    input_docs = subset_documents(input_docs, config.sample_size, config.shuffle_seed)
+    keep = {d.doc_id for d in input_docs}
+    entities = [e for e in entities if e.doc_id in keep]
 
     return GoldDataset(name=config.name, entities=entities, input_docs=input_docs)
 
@@ -137,7 +139,6 @@ def prepare_rusentne(
 ) -> PreparedDataset:
     raw = (fetcher or fetch_rusentne)(config, Path(workdir))
     dataset = parse_rusentne(raw, config)
-    input_path = str(Path(workdir) / f"{config.name}_input.jsonl")
-    gold_path = str(Path(workdir) / f"{config.name}_gold.jsonl")
+    input_path, gold_path = prepare_paths(Path(workdir), config.name)
     write_gold_jsonl(dataset, gold_path, input_path)
     return PreparedDataset(dataset=dataset, input_path=input_path, gold_path=gold_path)

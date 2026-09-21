@@ -1,4 +1,7 @@
-"""Integration tests for the M1 CLI validation pipeline (hermetic, no network)."""
+"""Integration tests for the validation pipeline (hermetic, no network).
+
+Includes per-entry orchestration and failure isolation (T4).
+"""
 
 import json
 import subprocess
@@ -13,7 +16,8 @@ from validation.base import (
     ValidationRequest,
 )
 from validation.core import run_validation
-from validation.datasets.base import DatasetConfig, PreparedDataset
+from validation.datasets.base import DatasetClass, DatasetConfig, PreparedDataset
+from validation.suites import ResolvedEntry
 
 STUB_SOLUTION = """
 import json, sys, argparse
@@ -48,21 +52,31 @@ def _make_stub_repo(tmp_path: Path) -> tuple[str, str]:
     return str(repo), commit
 
 
-def _stub_dataset_fn(name: str):
+def _entry(name: str, dataset_class: DatasetClass) -> ResolvedEntry:
+    return ResolvedEntry(
+        name=name,
+        dataset_class=dataset_class,
+        config=DatasetConfig(name=name, source=name),
+    )
+
+
+def _stub_dataset_fn(name: str, mention: str = "John", with_relations: bool = False):
     def prepare(config: DatasetConfig, workdir: Path, fetcher=None) -> PreparedDataset:
         dataset = GoldDataset(
             name=name,
-            entities=[GoldEntity(doc_id="d1", mention="John", type="PEOPLE", sentiment="POSITIVE")],
-            input_docs=[InputDocument(doc_id="d1", text="John works here.")],
+            entities=[
+                GoldEntity(doc_id="d1", mention=mention, type="PEOPLE", sentiment="POSITIVE")
+            ],
+            input_docs=[InputDocument(doc_id="d1", text=f"{mention} works here.")],
         )
         input_path = str(Path(workdir) / f"{name}_input.jsonl")
         gold_path = str(Path(workdir) / f"{name}_gold.jsonl")
         with open(input_path, "w") as f:
-            f.write(json.dumps({"doc_id": "d1", "text": "John works here."}) + "\n")
+            f.write(json.dumps({"doc_id": "d1", "text": f"{mention} works here."}) + "\n")
         with open(gold_path, "w") as f:
             f.write(
                 json.dumps(
-                    {"doc_id": "d1", "mention": "John", "type": "PEOPLE", "sentiment": "POSITIVE"}
+                    {"doc_id": "d1", "mention": mention, "type": "PEOPLE", "sentiment": "POSITIVE"}
                 )
                 + "\n"
             )
@@ -71,35 +85,45 @@ def _stub_dataset_fn(name: str):
     return prepare
 
 
-def _stub_runner(clone_path, prepared, request, timeout_s):
-    # Simulate a solution run: produce matching output directly.
-    output_path = Path(prepared.input_path).with_name("solution_output.jsonl")
+def _stub_runner(clone_path, entry, prepared, request, timeout_s):
+    """Simulate a solution run: echo the entry's own gold entity back."""
+    doc = json.loads(open(prepared.input_path).read().splitlines()[0])
+    entity = json.loads(open(prepared.gold_path).read().splitlines()[0])
+    output_path = Path(prepared.input_path).with_name(f"{entry.name}_solution_output.jsonl")
+    record = {
+        "doc_id": doc["doc_id"],
+        "entities": [
+            {
+                "entity_id": "e1",
+                "mention": entity["mention"],
+                "type": entity["type"],
+                "sentiment": entity["sentiment"],
+            }
+        ],
+        "relations": [],
+    }
     with open(output_path, "w") as f:
-        f.write(
-            json.dumps(
-                {
-                    "doc_id": "d1",
-                    "entities": [
-                        {
-                            "entity_id": "e1",
-                            "mention": "John",
-                            "type": "PEOPLE",
-                            "sentiment": "POSITIVE",
-                        }
-                    ],
-                    "relations": [],
-                }
-            )
-            + "\n"
-        )
-    return 0.1, SolutionOutput.model_validate_json(
-        json.dumps({"documents": [json.loads(open(output_path).read().splitlines()[0])]})
-    )
+        f.write(json.dumps(record) + "\n")
+    return 0.1, SolutionOutput.model_validate({"documents": [record]})
+
+
+def _ent_entries() -> list[ResolvedEntry]:
+    return [
+        _entry("ent1", DatasetClass.ENTITY_RELATION),
+        _entry("sent1", DatasetClass.SENTIMENT),
+    ]
 
 
 def test_run_validation_stub(tmp_path: Path) -> None:
-    config = {"workdir": str(tmp_path / "run"), "run_timeout_s": 60}
-    dataset_fns = {"stub1": _stub_dataset_fn("stub1")}
+    config = {
+        "workdir": str(tmp_path / "run"),
+        "run_timeout_s": 60,
+        "entries": _ent_entries(),
+    }
+    dataset_fns = {
+        "ent1": _stub_dataset_fn("ent1"),
+        "sent1": _stub_dataset_fn("sent1", mention="Acme"),
+    }
     request = ValidationRequest(repo="stub", commit="c", solution_overrides="")
     result = run_validation(
         request,
@@ -110,14 +134,14 @@ def test_run_validation_stub(tmp_path: Path) -> None:
         llm_check_fn=lambda clone, req: True,
     )
     assert result.ac_results["AC1"].status == ACStatus.ACCEPTED
+    assert result.ac_results["AC2"].status == ACStatus.ACCEPTED
     assert result.ac_results["AC4"].status == ACStatus.ACCEPTED
     assert result.ac_results["AC5"].status == ACStatus.ACCEPTED
-    assert result.ac_results["AC2"].status == ACStatus.ACCEPTED  # sentiment computed from stub gold
-    assert result.ac_results["AC3"].status == ACStatus.INVALID  # no relation gold in stub
+    assert result.ac_results["AC3"].status == ACStatus.INVALID  # no relation gold in stubs
 
 
 def test_run_validation_clone_failure(tmp_path: Path) -> None:
-    config = {"workdir": str(tmp_path / "run"), "run_timeout_s": 60}
+    config = {"workdir": str(tmp_path / "run"), "run_timeout_s": 60, "entries": _ent_entries()}
     request = ValidationRequest(repo="bad", commit="c")
 
     def bad_clone(req, wd):
@@ -127,7 +151,7 @@ def test_run_validation_clone_failure(tmp_path: Path) -> None:
         request,
         config,
         clone_fn=bad_clone,
-        dataset_fns={"stub": _stub_dataset_fn("stub")},
+        dataset_fns={"ent1": _stub_dataset_fn("ent1"), "sent1": _stub_dataset_fn("sent1")},
         runner_fn=_stub_runner,
         llm_check_fn=lambda c, r: False,
     )
@@ -136,18 +160,88 @@ def test_run_validation_clone_failure(tmp_path: Path) -> None:
 
 
 def test_run_validation_solution_failure(tmp_path: Path) -> None:
-    config = {"workdir": str(tmp_path / "run"), "run_timeout_s": 60}
+    config = {"workdir": str(tmp_path / "run"), "run_timeout_s": 60, "entries": _ent_entries()}
     request = ValidationRequest(repo="stub", commit="c")
 
-    def bad_runner(clone_path, prepared, request, timeout_s):
+    def bad_runner(clone_path, entry, prepared, request, timeout_s):
         raise RuntimeError("solution exited 1")
 
     result = run_validation(
         request,
         config,
         runner_fn=bad_runner,
-        dataset_fns={"stub": _stub_dataset_fn("stub")},
+        dataset_fns={"ent1": _stub_dataset_fn("ent1"), "sent1": _stub_dataset_fn("sent1")},
         clone_fn=lambda req, wd: tmp_path,
         llm_check_fn=lambda c, r: False,
     )
     assert result.ac_results["AC1"].status == ACStatus.INVALID
+
+
+# --- T4: per-entry isolation (rows 13, 14, 15) ------------------------------
+
+
+def test_entry_preparation_failure_is_isolated(tmp_path: Path) -> None:
+    """Row 13: only the failing entry's metrics degrade to failed_to_compute."""
+    config = {"workdir": str(tmp_path / "run"), "run_timeout_s": 60, "entries": _ent_entries()}
+    request = ValidationRequest(repo="stub", commit="c")
+
+    def exploding(config: DatasetConfig, workdir: Path, fetcher=None) -> PreparedDataset:
+        raise RuntimeError("prep exploded for sent1")
+
+    result = run_validation(
+        request,
+        config,
+        runner_fn=_stub_runner,
+        dataset_fns={"ent1": _stub_dataset_fn("ent1"), "sent1": exploding},
+        clone_fn=lambda req, wd: tmp_path,
+        llm_check_fn=lambda c, r: True,
+    )
+    # The entity-relation entry still produced measurable metrics.
+    assert result.ac_results["AC1"].status == ACStatus.ACCEPTED
+    # The sentiment entry did not: its criterion is invalid, not the whole run.
+    assert result.ac_results["AC2"].status == ACStatus.INVALID
+
+
+def test_entry_run_failure_is_isolated(tmp_path: Path) -> None:
+    """Row 14: same isolation for a failing solution run."""
+    config = {"workdir": str(tmp_path / "run"), "run_timeout_s": 60, "entries": _ent_entries()}
+    request = ValidationRequest(repo="stub", commit="c")
+
+    def selective_runner(clone_path, entry, prepared, request, timeout_s):
+        if entry.name == "sent1":
+            raise RuntimeError("solution exited 1")
+        return _stub_runner(clone_path, entry, prepared, request, timeout_s)
+
+    result = run_validation(
+        request,
+        config,
+        runner_fn=selective_runner,
+        dataset_fns={"ent1": _stub_dataset_fn("ent1"), "sent1": _stub_dataset_fn("sent1")},
+        clone_fn=lambda req, wd: tmp_path,
+        llm_check_fn=lambda c, r: True,
+    )
+    assert result.ac_results["AC1"].status == ACStatus.ACCEPTED
+    assert result.ac_results["AC2"].status == ACStatus.INVALID
+
+
+def test_metrics_do_not_mix_entries(tmp_path: Path) -> None:
+    """Row 15: each metric reflects exactly one entry's documents."""
+    config = {"workdir": str(tmp_path / "run"), "run_timeout_s": 60, "entries": _ent_entries()}
+    request = ValidationRequest(repo="stub", commit="c")
+    result = run_validation(
+        request,
+        config,
+        runner_fn=_stub_runner,
+        dataset_fns={
+            "ent1": _stub_dataset_fn("ent1", mention="John"),
+            "sent1": _stub_dataset_fn("sent1", mention="Acme"),
+        },
+        clone_fn=lambda req, wd: tmp_path,
+        llm_check_fn=lambda c, r: True,
+    )
+    # VM1/VM2 read the entity-relation entry, VM3/VM4 the sentiment one; both perfect.
+    assert result.ac_results["AC1"].status == ACStatus.ACCEPTED
+    assert result.ac_results["AC2"].status == ACStatus.ACCEPTED
+    workdir = Path(config["workdir"])
+    assert (workdir / "ent1_input.jsonl").exists()
+    assert (workdir / "sent1_input.jsonl").exists()

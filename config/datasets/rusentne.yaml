@@ -1,0 +1,8 @@
+# @package datasets.rusentne
+
+name: rusentne
+source: rusentne
+class: sentiment
+# null = the entire source.
+sample_size: null
+shuffle_seed: 20260921

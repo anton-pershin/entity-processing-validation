@@ -21,7 +21,7 @@ from validation.base import (
     ValidationResult,
 )
 from validation.datasets import prepare_conll04, prepare_rusentne
-from validation.datasets.base import DatasetConfig, PreparedDataset
+from validation.datasets.base import PreparedDataset, ResolvedEntry
 from validation.datasets.cache import DEFAULT_CACHE_DIR
 from validation.metrics import (
     entity_precision_recall,
@@ -37,19 +37,22 @@ TYPE_LIST_ARGS = {
     "sentiment_types": "[POSITIVE, NEUTRAL, NEGATIVE]",
 }
 
-DATASET_PREPARERS: dict[str, Callable] = {
+# Entry name -> its preparation function. The entry's own `source` selects the
+# preparer; an injected `dataset_fns` map (keyed by entry name) overrides this
+# for tests.
+SOURCE_PREPARERS: dict[str, Callable] = {
     "conll04": prepare_conll04,
     "rusentne": prepare_rusentne,
 }
 
 
-def _make_fetcher(name: str, cache_dir: Path):
+def _make_fetcher(source: str, cache_dir: Path):
     """Build a dataset-specific fetcher bound to the shared cache directory."""
-    if name == "conll04":
+    if source == "conll04":
         from validation.datasets.conll04 import fetch_conll04
 
         return lambda cfg, dest: fetch_conll04(cfg, dest, cache_dir=cache_dir)
-    if name == "rusentne":
+    if source == "rusentne":
         from validation.datasets.rusentne import fetch_rusentne
 
         return lambda cfg, dest: fetch_rusentne(cfg, dest, cache_dir=cache_dir)
@@ -71,9 +74,19 @@ def _failed(metric_id: str, message: str) -> MetricResult:
 
 
 def _ensure_all_acs(result: ValidationResult, metric_results: dict[str, MetricResult]) -> None:
-    for ac_id in ["AC1", "AC2", "AC3", "AC4", "AC5"]:
+    for ac_id in [f"AC{i}" for i in range(1, 6)]:
         if ac_id not in result.ac_results:
             result.ac_results[ac_id] = evaluate_ac(ac_id, metric_results)
+
+
+def _entry_preparer(entry: ResolvedEntry, dataset_fns: dict[str, Callable] | None) -> Callable:
+    """The preparation function for one resolved entry."""
+    if dataset_fns and entry.name in dataset_fns:
+        return dataset_fns[entry.name]
+    source = entry.config.source_name
+    if source not in SOURCE_PREPARERS:
+        raise ValueError(f"no preparer registered for dataset source '{source}'")
+    return SOURCE_PREPARERS[source]
 
 
 def run_validation(
@@ -84,11 +97,16 @@ def run_validation(
     clone_fn: Callable | None = None,
     llm_check_fn: Callable | None = None,
 ) -> ValidationResult:
-    """Orchestrate a full validation run; always returns a ValidationResult."""
+    """Orchestrate a full validation run; always returns a ValidationResult.
+
+    ``config["entries"]`` holds the resolved suite (``ResolvedEntry`` values).
+    Each entry is prepared and run independently, so a failure in one entry
+    degrades only the metrics that read it (FR5).
+    """
     workdir = Path(config.get("workdir", "/tmp/entity_processing_validation"))
     workdir.mkdir(parents=True, exist_ok=True)
     timeout_s = config.get("run_timeout_s", 3600)
-    dataset_fns = dataset_fns or DATASET_PREPARERS
+    entries: list[ResolvedEntry] = list(config.get("entries", []))
     clone_fn = clone_fn or clone_repo
     llm_check_fn = llm_check_fn or check_model
 
@@ -108,65 +126,65 @@ def run_validation(
         )
         return result
 
-    # Stage 2: sweep stale run artifacts (dataset JSONLs, outputs, venvs) so a
-    # fresh run in a persistent workdir cannot read a previous run's output.
-    prep_error: str | None = None
-    prepared_datasets: dict[str, PreparedDataset] = {}
+    # Stage 2: sweep stale artifacts of a previous run (every entry of this
+    # suite, not a fixed pair of names), then prepare each entry.
     cache_dir = Path(config.get("datasets_cache_dir", str(DEFAULT_CACHE_DIR))).expanduser()
-    for stale in workdir.glob("*_input.jsonl"):
-        stale.unlink(missing_ok=True)
-    for stale in workdir.glob("*_gold.jsonl"):
-        stale.unlink(missing_ok=True)
-    for stale in workdir.glob("*_solution_output.jsonl"):
-        stale.unlink(missing_ok=True)
+    for pattern in ("*_input.jsonl", "*_gold.jsonl", "*_solution_output.jsonl"):
+        for stale in workdir.glob(pattern):
+            stale.unlink(missing_ok=True)
     for stale in workdir.glob("*_solution_venv"):
         shutil.rmtree(stale, ignore_errors=True)
-    dataset_configs: dict = config.get("dataset_configs", {})
-    for name, prepare_fn in dataset_fns.items():
-        cfg = DatasetConfig(
-            name=name,
-            max_docs=dataset_configs.get(name, {}).get("max_docs"),
-        )
-        fetcher = _make_fetcher(name, cache_dir)
+
+    prepared_datasets: dict[str, PreparedDataset] = {}
+    for entry in entries:
         try:
-            prepared = prepare_fn(cfg, workdir, fetcher=fetcher)
-            prepared_datasets[name] = prepared
-            golds[name] = prepared.dataset
-            timing.n_documents += len(prepared.dataset.input_docs)
+            preparer = _entry_preparer(entry, dataset_fns)
+            fetcher = _make_fetcher(entry.config.source_name, cache_dir)
+            prepared = preparer(entry.config, workdir, fetcher=fetcher)
         except Exception as e:
-            prep_error = f"dataset prep failed for {name}: {e}"
+            _fail_metrics(
+                metric_results,
+                f"dataset prep failed for entry '{entry.name}': {e}",
+                entry.dataset_class.metric_ids(),
+            )
+            continue
+        prepared_datasets[entry.name] = prepared
+        golds[entry.name] = prepared.dataset
+        timing.n_documents += len(prepared.dataset.input_docs)
 
-    # Stage 3: run solution per dataset
-    per_dataset_timing: dict[str, tuple[float, int]] = {}
-    if prep_error is None:
-        run_fn = runner_fn or _default_run_solution
-        for name, prepared in prepared_datasets.items():
-            try:
-                elapsed_s, output = run_fn(clone_path, prepared, request, timeout_s)
-                outputs[name] = output
-                n_docs = len(golds[name].input_docs) if name in golds else 0
-                per_dataset_timing[name] = (elapsed_s / 60.0, n_docs)
-                timing.total_minutes += elapsed_s / 60.0
-                timing.n_documents += n_docs
-            except Exception as e:
-                _fail_metrics(metric_results, f"solution run failed for {name}: {e}")
+    # Stage 3: run the solution once per prepared entry.
+    per_entry_timing: dict[str, tuple[float, int]] = {}
+    run_fn = runner_fn or _default_run_solution
+    for entry in entries:
+        prepared = prepared_datasets.get(entry.name)
+        if prepared is None:
+            continue
+        try:
+            elapsed_s, output = run_fn(clone_path, entry, prepared, request, timeout_s)
+            outputs[entry.name] = output
+            n_docs = len(prepared.dataset.input_docs)
+            per_entry_timing[entry.name] = (elapsed_s / 60.0, n_docs)
+            timing.total_minutes += elapsed_s / 60.0
+        except Exception as e:
+            _fail_metrics(
+                metric_results,
+                f"solution run failed for entry '{entry.name}': {e}",
+                entry.dataset_class.metric_ids(),
+            )
 
-    # Stage 4: compute metrics
-    # Metric families keyed by the dataset capabilities they require.
-    # Each metric computation is scoped so one failure does not blanket-fail the rest.
+    # Stage 4: compute metrics, scoped to the dataset class each entry feeds.
     def _try_setdefault(metric_id: str, compute) -> None:
         try:
-            value = compute()
-            metric_results.setdefault(metric_id, _ok(metric_id, value))
+            metric_results.setdefault(metric_id, _ok(metric_id, compute()))
         except Exception as e:
             metric_results.setdefault(
                 metric_id, _failed(metric_id, f"metric computation failed: {e}")
             )
 
-    for name in outputs:
-        if name not in golds:
+    for name, output in outputs.items():
+        gold = golds.get(name)
+        if gold is None:
             continue
-        gold, output = golds[name], outputs[name]
         if gold.entities:
             _try_setdefault(
                 "VM1", lambda gold=gold, output=output: entity_precision_recall(gold, output)[0]
@@ -189,12 +207,11 @@ def run_validation(
                 "VM4", lambda gold=gold, output=output: sentiment_precision_recall(gold, output)[1]
             )
 
-    # VM7: per-dataset speed; the criterion uses the slowest dataset run.
-    # per_dataset: name -> (elapsed_minutes, n_docs); captured in stage 3.
-    if per_dataset_timing:
+    # VM7: per-entry speed; the criterion uses the slowest entry run.
+    if per_entry_timing:
         worst = max(
             minutes / (docs / 100) if docs else float("inf")
-            for minutes, docs in per_dataset_timing.values()
+            for minutes, docs in per_entry_timing.values()
         )
         if worst != float("inf"):
             _try_setdefault("VM7", lambda: worst)
@@ -214,36 +231,38 @@ def run_validation(
 
     _try_setdefault("VM8", _llm_check)
 
-    # Ensure missing metrics fail explicitly
+    # Ensure missing metrics fail explicitly.
     for i in range(1, 9):
-        metric_results.setdefault(f"VM{i}", _failed(f"VM{i}", prep_error or "metric not evaluated"))
+        metric_results.setdefault(f"VM{i}", _failed(f"VM{i}", "metric not evaluated"))
 
     # Stage 5: acceptance
     _ensure_all_acs(result, metric_results)
     return result
 
 
-def _fail_metrics(metric_results: dict[str, MetricResult], message: str) -> None:
-    for i in range(1, 9):
-        metric_results.setdefault(f"VM{i}", _failed(f"VM{i}", message))
-
-
-def _ensure_all_acs(result: ValidationResult, metric_results: dict[str, MetricResult]) -> None:
-    for ac_id in ["AC1", "AC2", "AC3", "AC4", "AC5"]:
-        if ac_id not in result.ac_results:
-            result.ac_results[ac_id] = evaluate_ac(ac_id, metric_results)
+def _fail_metrics(
+    metric_results: dict[str, MetricResult], message: str, metric_ids: list[str] | None = None
+) -> None:
+    """Mark ``metric_ids`` (or every metric) failed_to_compute."""
+    ids = metric_ids if metric_ids else [f"VM{i}" for i in range(1, 9)]
+    for metric_id in ids:
+        metric_results.setdefault(metric_id, _failed(metric_id, message))
 
 
 def _default_run_solution(
-    clone_path: Path, prepared: PreparedDataset, request: ValidationRequest, timeout_s: int
+    clone_path: Path,
+    entry: ResolvedEntry,
+    prepared: PreparedDataset,
+    request: ValidationRequest,
+    timeout_s: int,
 ) -> tuple[float, SolutionOutput]:
     """Run scripts/extract_entities.py in a fresh venv; return (elapsed_s, SolutionOutput).
 
-    The venv is deleted after the run (success, failure, timeout or parse error)
-    via try/finally; the output path is per-dataset so append-mode solutions
-    cannot contaminate other datasets' runs.
+    The venv is temporary and deleted after the run (success, failure, timeout
+    or parse error) via try/finally; the output path is per entry so solutions
+    appending to their output cannot contaminate another entry's run.
     """
-    venv_dir = Path(prepared.input_path).parent / f"{prepared.dataset.name}_solution_venv"
+    venv_dir = Path(prepared.input_path).parent / f"{entry.name}_solution_venv"
     venv.create(str(venv_dir), with_pip=True)
     python_bin = venv_dir / "bin" / "python"
     try:
@@ -266,7 +285,7 @@ def _default_run_solution(
                 break
 
         output_path = str(
-            Path(prepared.input_path).with_name(f"{prepared.dataset.name}_solution_output.jsonl")
+            Path(prepared.input_path).with_name(f"{entry.name}_solution_output.jsonl")
         )
         args = [
             str(python_bin),

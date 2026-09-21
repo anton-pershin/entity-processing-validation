@@ -14,7 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from validation.base import GoldDataset, GoldEntity, GoldRelation, InputDocument
-from validation.datasets.base import DatasetConfig, PreparedDataset
+from validation.datasets.base import DatasetConfig, PreparedDataset, prepare_paths, subset_documents
 from validation.datasets.cache import DEFAULT_CACHE_DIR, cached_fetch
 
 TYPE_MAP = {"Peop": "PEOPLE", "Loc": "LOCATION", "Org": "ORGANIZATION", "Other": "OTHER"}
@@ -48,10 +48,14 @@ def fetch_conll04(config: DatasetConfig, dest_dir: Path, cache_dir: Path | None 
 
 
 def parse_conll04(raw_path: Path, config: DatasetConfig) -> GoldDataset:
-    """Convert spert-format CoNLL04 JSON into a GoldDataset."""
+    """Convert spert-format CoNLL04 JSON into a GoldDataset.
+
+    A subset is taken from the raw document records *before* conversion, so
+    relation endpoint indices still refer to entities that survive the cut and
+    no relation can outlive its endpoints (FR4).
+    """
     docs = json.loads(Path(raw_path).read_text())
-    if config.max_docs is not None:
-        docs = docs[: config.max_docs]
+    docs = subset_documents(docs, config.sample_size, config.shuffle_seed)
 
     entities: list[GoldEntity] = []
     relations: list[GoldRelation] = []
@@ -109,7 +113,6 @@ def prepare_conll04(
 ) -> PreparedDataset:
     raw = (fetcher or fetch_conll04)(config, Path(workdir))
     dataset = parse_conll04(raw, config)
-    input_path = str(Path(workdir) / f"{config.name}_input.jsonl")
-    gold_path = str(Path(workdir) / f"{config.name}_gold.jsonl")
+    input_path, gold_path = prepare_paths(Path(workdir), config.name)
     write_gold_jsonl(dataset, gold_path, input_path)
     return PreparedDataset(dataset=dataset, input_path=input_path, gold_path=gold_path)

@@ -1,0 +1,12 @@
+defaults:
+  - _self_
+
+# Dataset entry to materialize (config/datasets/<entry>.yaml), e.g. conll04_small.
+entry: null
+# Directory the entry's input and gold JSONL are written to.
+output_dir: null
+
+# Only used as the fetcher destination on a cache miss.
+workdir: /tmp/entity_processing_validation
+# Shared raw dataset cache (downloads reused across runs).
+datasets_cache_dir: ~/.cache/entity_processing_validation/datasets

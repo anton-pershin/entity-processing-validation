@@ -1,0 +1,7 @@
+# @package datasets.rusentne_small
+
+name: rusentne_small
+source: rusentne
+class: sentiment
+sample_size: 100
+shuffle_seed: 20260921

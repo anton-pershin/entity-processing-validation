@@ -1,0 +1,6 @@
+# @package suites.full
+
+name: full
+entries:
+  - conll04
+  - rusentne

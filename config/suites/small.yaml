@@ -1,0 +1,6 @@
+# @package suites.small
+
+name: small
+entries:
+  - conll04_small
+  - rusentne_small
