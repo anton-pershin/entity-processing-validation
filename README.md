@@ -48,10 +48,26 @@ python scripts/validation_cli.py \
 
 ## Usage (HTTP service, M2)
 
+Start the long-running service with Hydra; the default endpoint is
+`http://127.0.0.1:8456/validate`:
+
 ```bash
-python scripts/validation_service.py port=8456
-# POST {"repo": "...", "commit": "...", "solution_overrides": "..."}
+/home/tony/venvs/entity_processing_validation/bin/python scripts/validation_service.py
+# Override the listening port or validation suite:
+/home/tony/venvs/entity_processing_validation/bin/python scripts/validation_service.py port=9000 suite=small
 ```
+
+Send a JSON request. `solution_overrides` is optional and defaults to an empty
+string; the response is the same validation result produced by the CLI:
+
+```bash
+curl -X POST http://127.0.0.1:8456/validate \
+  -H 'Content-Type: application/json' \
+  -d '{"repo": "<clonable link to repo>", "commit": "<commit hash>", "solution_overrides": "<args separated by whitespaces>"}'
+```
+
+A solution-level failure is returned as a normal result with the affected
+metrics marked `failed_to_compute`; malformed requests return an HTTP 4xx error.
 
 ## Materializing a subset variant
 

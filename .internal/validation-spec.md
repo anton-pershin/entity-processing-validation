@@ -255,7 +255,7 @@ The implementation is organized as two milestones. M1 delivers the full validati
 
 | ID | Name | Status | Expected result | Duration | Strong scaling efficiency |
 |----|------|--------|-----------------|----------|---------------------------|
-| M1 | CLI implementation | To do | Repository scaffold (`pyproject.toml`, `requirements*.txt`, `run_linters.sh`, Hydra `config/`). Dataset preparation for CoNLL04 and RuSentNE (fetch + gold JSONL conversion). Solution runner (venv sandbox, subprocess execution, timing). Metrics VM1–VM8 and acceptance criteria AC1–AC5 evaluation. `scripts/validation_cli.py` validating a solution repo end-to-end from the command line, producing the result JSON. | 2 | 0.5 |
+| M1 | CLI implementation | Done | Repository scaffold (`pyproject.toml`, `requirements*.txt`, `run_linters.sh`, Hydra `config/`). Dataset preparation for CoNLL04 and RuSentNE (fetch + gold JSONL conversion). Solution runner (venv sandbox, subprocess execution, timing). Metrics VM1–VM8 and acceptance criteria AC1–AC5 evaluation. `scripts/validation_cli.py` validating a solution repo end-to-end from the command line, producing the result JSON. | 2 | 0.5 |
 | M2 | HTTP service implementation | To do | `scripts/validation_service.py` exposing the same validation procedure via HTTP (FastAPI + uvicorn, `POST /validate`), reusing the M1 orchestrator unchanged. | 0.5 | 0.8 |
 
 ```mermaid

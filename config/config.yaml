@@ -7,6 +7,10 @@ commit: null
 output_json: null
 solution_overrides: ""
 
+# HTTP service defaults.
+host: 127.0.0.1
+port: 8456
+
 # Validation suite to run (config/suites/<name>.yaml): full | small.
 suite: full
 
